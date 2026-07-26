@@ -1,5 +1,240 @@
 ---
-title: "Project"
+title: "What are the annual salaries and reported percent increases annually at Blizzard?"
+author: "Christopher Navarro"
 format: html
 ---
+
+```{r}
+
+library(tidyverse)
+
+```
+
+```{r}
+data_file<-read.csv("blizzard_salary.csv", stringsAsFactors = FALSE)
+
+message("Read object 'data_file' with dimensions:", paste(dim(data_file), collapse = " x "))
+
+```
+
+Confirm the file exists before proceeding. We normalize the column names with base string operations because only tidyverse is being used.
+
+```{r}
+#Normalize names to lowercase and safe names
+
+names(data_file) <-names(data_file) %>%
+  tolower() %>%
+  str_replace_all("[[:space:]]+", "_") %>%
+  str_replace_all("[^0-9a-z_]", "")
+
+bliz_raw<-as_tibble(data_file)
+
+glimpse(bliz_raw)
+
+```
+```{r}
+#preview
+bliz_raw %>%
+  select(any_of(c("timestamp", "status", "current_title", "current_salary", "salary_type", "percent_incr", "other_info", "location", "performance_rating"))) %>%
+  slice_head(n=8) %>%
+  knitr::kable(caption = "Sample rows (raw)")
+
+```
+This is a small sample of the total blizzard salary data. Under each title there is a description if not possible then there is an NA instead. The salary is given and to the left is the type. For some they are paid hourly and others is yearly. The percentage changed are liste along with locations. 
+
+Goals:
+
+1. Convert all salaries to annual USD annual_slary using hourly (via the anualization rule hourly times 40 times 52).
+2. Get the data for the percentage of increase in salaries and compare them. 
+
+```{r}
+library(tidyverse)
+
+# assume data_file <- read.csv("blizzard_salary.csv", stringsAsFactors = FALSE)
+# create a working raw copy (preserve data_file)
+bliz_raw <- data_file
+
+bliz_clean <- bliz_raw %>%
+
+  # 1) Basic normalization and safe character extraction (all arguments inside mutate(), separated by commas)
+  mutate(
+    current_title = coalesce(as.character(current_title), "") %>% str_squish(),
+    status = coalesce(as.character(status), "Unknown") %>% str_squish(),
+    salary_type_orig = as.character(salary_type),
+    current_salary_raw = as.character(current_salary),
+    percent_incr_raw = as.character(percent_incr)
+  ) %>%
+
+  # 2) Parse numeric salary and percent fields (remove $ and commas)
+  mutate(
+    current_salary_num = current_salary_raw %>%
+      str_remove_all("[$,]") %>%
+      str_trim() %>%
+      na_if("") %>%
+      as.numeric(),
+
+    percent_incr_num = percent_incr_raw %>%
+      str_remove_all("[%,$]") %>%
+      str_trim() %>%
+      na_if("") %>%
+      as.numeric()
+  ) %>%
+
+  # 3) Canonicalize salary_type into "hour"/"year" (case_when entries separated by commas)
+  mutate(
+    salary_type_clean = coalesce(salary_type_orig, "") %>%
+      str_to_lower() %>%
+      str_squish(),
+
+    salary_type_clean = case_when(
+      str_detect(salary_type_clean, "hour|hr|hourly") ~ "hour",
+      str_detect(salary_type_clean, "year|yr|yearly|annual|salary") ~ "year",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+
+  # 4) Compute annual_salary:
+  # hourly -> numeric * (40 * 52), yearly -> numeric as-is
+  mutate(
+    annual_salary = case_when(
+      salary_type_clean == "hour" & !is.na(current_salary_num) ~ current_salary_num * (40 * 52),
+      salary_type_clean == "year" & !is.na(current_salary_num) ~ current_salary_num,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+
+  # 5) Preserve optional fields (safe extraction)
+  mutate(
+    location = if ("location" %in% names(.)) coalesce(as.character(location), NA_character_) else NA_character_,
+    performance_rating = if ("performance_rating" %in% names(.)) coalesce(as.character(performance_rating), NA_character_) else NA_character_
+  )
+```
+
+
+```{r}
+# Make a working copy (preserve data_file)
+bliz_raw <- data_file
+
+
+bliz_clean <- bliz_raw %>%
+
+  # 1) Basic normalization and keep raw text copies for debugging
+  mutate(
+    current_title = coalesce(as.character(current_title), "") %>% str_squish(),
+    status = coalesce(as.character(status), "Unknown") %>% str_squish(),
+    salary_type_orig = as.character(salary_type),         # original salary_type text kept
+    current_salary_raw = as.character(current_salary),    # original salary string kept
+    percent_incr_raw = as.character(percent_incr)        # original percent_incr string kept
+  ) %>%
+
+  # 2) Parse numeric salary and percent (strip $ , % etc.)
+  mutate(
+    current_salary_num = current_salary_raw %>%
+      str_remove_all("[$,]") %>%    # remove dollar and comma
+      str_trim() %>%
+      na_if("") %>%
+      as.numeric(),
+
+    percent_incr_num = percent_incr_raw %>%
+      str_remove_all("[%,$]") %>%
+      str_trim() %>%
+      na_if("") %>%
+      as.numeric()
+  ) %>%
+
+  # 3) Canonicalize salary_type into "hour"/"year" using pattern matching
+  mutate(
+    salary_type_clean = coalesce(salary_type_orig, "") %>%
+      str_to_lower() %>%
+      str_squish(),
+
+    salary_type_clean = case_when(
+      str_detect(salary_type_clean, "hour|hr|hourly") ~ "hour",
+      str_detect(salary_type_clean, "year|yr|yearly|annual|salary") ~ "year",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+
+  # 4) Compute annual_salary (hour -> *40*52, year -> as-is). require numeric salary present.
+  mutate(
+    annual_salary = case_when(
+      salary_type_clean == "hour" & !is.na(current_salary_num) ~ current_salary_num * (40 * 52),
+      salary_type_clean == "year" & !is.na(current_salary_num) ~ current_salary_num,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+
+  # 5) Create title_group from keywords, default to "Other", then lump to top 6
+  mutate(
+    title_lower = str_to_lower(current_title),
+    title_group = case_when(
+      str_detect(title_lower, "engineer") ~ "Engineer",
+      str_detect(title_lower, "programmer|\\bdev\\b|developer|software") ~ "Engineer",
+      str_detect(title_lower, "designer") ~ "Designer",
+      str_detect(title_lower, "artist") ~ "Artist",
+      str_detect(title_lower, "producer") ~ "Producer",
+      str_detect(title_lower, "manager|lead|director") ~ "Management",
+      str_detect(title_lower, "qa|quality") ~ "QA",
+      str_detect(title_lower, "support|hr|people|recruit") ~ "Operations",
+      TRUE ~ "Other"
+    ),
+    title_group = fct_lump_n(factor(title_group), n = 6, other_level = "Other")
+  ) %>%
+
+  # 6) Preserve optional columns (safe extraction), keep original raw strings for debug
+  mutate(
+    location = if ("location" %in% names(.)) coalesce(as.character(location), NA_character_) else NA_character_,
+    performance_rating = if ("performance_rating" %in% names(.)) coalesce(as.character(performance_rating), NA_character_) else NA_character_
+  )
+
+```
+
+```{r}
+#Cleaning summary
+bliz_clean%>%
+  summarise(
+    total=n(),
+    missing_annual= sum(is.na(annual_salary)),
+    n_with_location = sum(!is.na(location)),
+    n_with_perf = sum(!is.na(performance_rating)),
+    median_annual = median(annual_salary, na.rm = TRUE)
+  )
+
+```
+
+The hourly wages were multiplied by 40 times 52 to get the annual. The percent strings were parsed. performance_rating used from CSV when available, if it was not it would be derived otherwise. 
+
+```{r}
+#EDA plots
+#Histogram of annual salary (raw)
+p1<-bliz_clean %>%
+  filter(!is.na(annual_salary)) %>%
+  ggplot(aes(x=annual_salary)) +
+  geom_histogram(bins=40, fill="#2b8cbe", color = "white", alpha=.9)+
+  labs(title="Annual Salary (raw)", x="Annual Salary USD", y="Count")
+
+#Histogram of log annual salary
+p2<-bliz_clean %>%
+  filter(!is.na(annual_salary)) %>%
+  ggplot(aes(x=log(annual_salary))) +
+  geom_histogram(bins=40, fill = "#7bccc4", color = "white", alpha = .09) +
+  labs(title= "Log(Annual Salary)", x="log(Annual Salary)", y="Count")
+
+# Percent increase distribution
+p3<- bliz_clean %>%
+  filter(!is.na(percent_incr_num)) %>%
+  ggplot(aes(x=percent_incr_num)) +
+  geom_histogram(bins = 30, fill = "#fdae61", color = "white", alpha = .09) +
+  labs(title = "Reported Percent Increase", x="Percent increase (%)", y= "Count")
+
+p1
+p2
+p3
+```
+
+The annual salaries for employees in USD seems to have a skewed right shape. The main salary for employees graphically appears to be around 50,000. In very rare cases the outliers for salries are 0 and 200,000 and greater. The peak of the skew as mentioned is at 50,000 but there is about roughly greate than 20 count of people ijn 100,000. The 150,000 count is slighly above 5. 
+
+The log of annual salaries is used top reduce the right skew and make the distribution more symettric so differences are easier top see and model. The histogram of log(annual salary) shows most observations clustered at hiogher log values (on the right side of the plot). Showing that on the original dollar sclae a substantial share of salaries are very large while few are very small.
+
+The usual percent increase lies between 0 and 5 percent. The largest increase is between 0 and 5 percent. The shape of the histogram is skewed right. In rare oiutlier cases the percent increase is 20 percent or greater. 
 
